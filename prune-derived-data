@@ -1,0 +1,269 @@
+#!/bin/bash
+#
+# prune-derived-data - Manage Xcode DerivedData directories
+#
+# Usage:
+#   prune-derived-data                  Show summary table (fast, no sizes)
+#   prune-derived-data --sizes          Show summary table with sizes (slow, runs du)
+#   prune-derived-data prune            Delete DerivedData for worktrees that no longer exist
+#   prune-derived-data prune --dry      Show what would be deleted without deleting
+#   prune-derived-data prune --days N   Also prune entries not built in the last N days
+#   prune-derived-data prune --days N --dry  Preview age-based pruning
+
+set -euo pipefail
+
+DERIVED_DATA_DIR="$HOME/Library/Developer/Xcode/DerivedData"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+DIM='\033[2m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+human_size() {
+	echo "$1" | awk '{
+		bytes = $1 * 512
+		if (bytes >= 1073741824) printf "%.1fG", bytes/1073741824
+		else if (bytes >= 1048576) printf "%.0fM", bytes/1048576
+		else printf "%.0fK", bytes/1024
+	}'
+}
+
+# Returns true if the directory is an Xcode project DerivedData dir (has the hash suffix pattern)
+is_project_dir() {
+	local name
+	name=$(basename "$1")
+	# Xcode DerivedData dirs match: ProjectName-<28 lowercase letters>
+	[[ "$name" =~ ^.+-[a-z]{28}$ ]]
+}
+
+# Get the last build date from the most recently modified build log or manifest.
+# Returns date as YYYY-MM-DD, or "?" if unknown.
+last_build_date() {
+	local dir=$1
+	local manifest="$dir/Logs/Build/LogStoreManifest.plist"
+	if [ -f "$manifest" ]; then
+		stat -f "%Sm" -t "%Y-%m-%d" "$manifest" 2>/dev/null
+	else
+		# Fall back to the DerivedData directory itself
+		stat -f "%Sm" -t "%Y-%m-%d" "$dir" 2>/dev/null || echo "?"
+	fi
+}
+
+# Get the last build timestamp as epoch seconds for age comparison.
+last_build_epoch() {
+	local dir=$1
+	local manifest="$dir/Logs/Build/LogStoreManifest.plist"
+	if [ -f "$manifest" ]; then
+		stat -f "%m" "$manifest" 2>/dev/null
+	else
+		stat -f "%m" "$dir" 2>/dev/null || echo "0"
+	fi
+}
+
+# Resolve project label and workspace path from a DerivedData directory
+# Sets: _label, _workspace_dir, _has_plist
+resolve_project() {
+	local dir=$1
+	local plist="$dir/info.plist"
+	local dirname
+	dirname=$(basename "$dir")
+
+	# Default label: strip the hash suffix
+	_label=${dirname%-*}
+	_workspace_dir=""
+	_has_plist=false
+
+	if [ -f "$plist" ]; then
+		_has_plist=true
+		local workspace
+		workspace=$(/usr/libexec/PlistBuddy -c "Print :WorkspacePath" "$plist" 2>/dev/null || echo "")
+		if [ -n "$workspace" ]; then
+			_workspace_dir=$(dirname "$workspace")
+			local dir_name
+			dir_name=$(basename "$_workspace_dir")
+			local file_name
+			file_name=$(basename "$workspace")
+			local project_name="${file_name%%.*}"
+			# Show "dir/project" when the project name differs from the directory name
+			if [ "$project_name" = "$dir_name" ]; then
+				_label="$dir_name"
+			else
+				_label="$dir_name/$project_name"
+			fi
+		fi
+	fi
+}
+
+list() {
+	local show_sizes=false
+	if [ "${1:-}" = "--sizes" ]; then
+		show_sizes=true
+	fi
+
+	local total_stale_blocks=0
+	local stale_count=0
+	local active_count=0
+	local du_output=""
+	local now
+	now=$(date +%s)
+
+	if $show_sizes; then
+		printf "Calculating sizes...\n"
+		du_output=$(du -s "$DERIVED_DATA_DIR"/*/ 2>/dev/null || true)
+	fi
+
+	printf "\n${BOLD}%-55s %-8s %-12s %s${RESET}\n" "Project" "Size" "Last Build" "Status"
+	printf "%-55s %-8s %-12s %s\n" "$(printf '%0.s─' {1..55})" "$(printf '%0.s─' {1..8})" "$(printf '%0.s─' {1..12})" "$(printf '%0.s─' {1..20})"
+
+	for dir in "$DERIVED_DATA_DIR"/*/; do
+		[ -d "$dir" ] || continue
+		is_project_dir "$dir" || continue
+
+		local _label _workspace_dir _has_plist
+		resolve_project "$dir"
+
+		local size blocks=0
+		if $show_sizes; then
+			blocks=$(echo "$du_output" | grep -F "$dir" | head -1 | cut -f1)
+			blocks=${blocks:-0}
+			size=$(human_size "$blocks")
+		else
+			size=""
+		fi
+
+		local date
+		date=$(last_build_date "$dir")
+		local epoch
+		epoch=$(last_build_epoch "$dir")
+		local age_days=0
+		if [ "$epoch" != "0" ]; then
+			age_days=$(( (now - epoch) / 86400 ))
+		fi
+
+		local date_display="$date"
+		if [ "$age_days" -gt 30 ] && [ "$date" != "?" ]; then
+			date_display="${DIM}${date}${RESET}"
+		fi
+
+		local is_stale=false
+
+		if $_has_plist; then
+			if [ -n "$_workspace_dir" ] && [ -d "$_workspace_dir" ]; then
+				printf "%-55s %-8s %-12b ${GREEN}Active${RESET}\n" "$_label" "$size" "$date_display"
+				active_count=$((active_count + 1))
+			else
+				printf "%-55s %-8s %-12b ${RED}Stale${RESET}\n" "$_label" "$size" "$date_display"
+				is_stale=true
+			fi
+		else
+			printf "%-55s %-8s %-12b ${YELLOW}Orphan${RESET}\n" "$(basename "$dir")" "$size" "$date_display"
+			is_stale=true
+		fi
+
+		if $is_stale; then
+			total_stale_blocks=$((total_stale_blocks + blocks))
+			stale_count=$((stale_count + 1))
+		fi
+	done
+
+	printf "\n${BOLD}%d active, %d prunable${RESET}" "$active_count" "$stale_count"
+	if $show_sizes && [ $stale_count -gt 0 ]; then
+		printf " (using %s)" "$(human_size $total_stale_blocks)"
+	fi
+	printf "\n"
+
+	if [ $stale_count -gt 0 ]; then
+		printf "Run '${BOLD}%s prune${RESET}' to delete stale entries.\n" "$0"
+	fi
+	printf "Run '${BOLD}%s prune --days 30${RESET}' to also prune entries not built in 30 days.\n\n" "$0"
+}
+
+prune() {
+	local dry_run=false
+	local max_age_days=0
+
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--dry) dry_run=true; shift ;;
+			--days) max_age_days="$2"; shift 2 ;;
+			*) shift ;;
+		esac
+	done
+
+	local pruned=0
+	local now
+	now=$(date +%s)
+
+	for dir in "$DERIVED_DATA_DIR"/*/; do
+		[ -d "$dir" ] || continue
+		is_project_dir "$dir" || continue
+
+		local _label _workspace_dir _has_plist
+		resolve_project "$dir"
+
+		local should_prune=false
+		local reason=""
+
+		if $_has_plist; then
+			if [ -z "$_workspace_dir" ] || [ ! -d "$_workspace_dir" ]; then
+				should_prune=true
+				reason="workspace gone"
+			fi
+		else
+			should_prune=true
+			reason="orphan"
+			_label=$(basename "$dir")
+		fi
+
+		# Age-based pruning (only if --days was specified and not already marked)
+		if ! $should_prune && [ "$max_age_days" -gt 0 ]; then
+			local epoch
+			epoch=$(last_build_epoch "$dir")
+			if [ "$epoch" != "0" ]; then
+				local age_days=$(( (now - epoch) / 86400 ))
+				if [ "$age_days" -ge "$max_age_days" ]; then
+					should_prune=true
+					reason="no build in ${age_days}d"
+				fi
+			fi
+		fi
+
+		if $should_prune; then
+			pruned=$((pruned + 1))
+
+			if $dry_run; then
+				printf "Would delete: %-40s (%s)\n" "$_label" "$reason"
+			else
+				printf "Deleting:     %-40s (%s)\n" "$_label" "$reason"
+				rm -rf "$dir"
+			fi
+		fi
+	done
+
+	if [ $pruned -eq 0 ]; then
+		echo "Nothing to prune."
+	elif $dry_run; then
+		printf "\n${BOLD}Would prune %d directories.${RESET}\n" "$pruned"
+	else
+		printf "\n${GREEN}Pruned %d directories.${RESET}\n" "$pruned"
+	fi
+}
+
+case "${1:-}" in
+	prune)
+		shift
+		prune "$@"
+		;;
+	--sizes)
+		list "--sizes"
+		;;
+	""|list)
+		list
+		;;
+	*)
+		echo "Usage: $0 [list [--sizes] | prune [--dry] [--days N]]"
+		exit 1
+		;;
+esac
