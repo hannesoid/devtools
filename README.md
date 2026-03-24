@@ -1,7 +1,3 @@
-# devtools
-
-A collection of developer tools for macOS.
-
 ## prune-derived-data
 
 Lists and prunes stale Xcode DerivedData directories — those whose workspace or project no longer exists on disk, or that haven't been built recently.
