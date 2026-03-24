@@ -259,6 +259,30 @@ prune() {
 	fi
 }
 
+usage() {
+	cat <<EOF
+Usage: $CMD_NAME <command> [options]
+
+Manage Xcode DerivedData directories. Lists project status and prunes
+entries whose workspace or project no longer exists on disk.
+
+Commands:
+  list              Show summary table (default)
+    --sizes         Include directory sizes (slow, runs du)
+  prune             Delete stale and orphan DerivedData directories
+    --dry           Preview what would be deleted
+    --days N        Also prune entries not built in the last N days
+  help              Show this help message
+
+Examples:
+  $CMD_NAME                      Show status of all DerivedData entries
+  $CMD_NAME --sizes              Same, but with sizes
+  $CMD_NAME prune --dry          Preview deletions
+  $CMD_NAME prune                Delete stale entries
+  $CMD_NAME prune --days 30      Delete stale + entries older than 30 days
+EOF
+}
+
 case "${1:-}" in
 	prune)
 		shift
@@ -270,8 +294,11 @@ case "${1:-}" in
 	""|list)
 		list
 		;;
+	help|--help|-h)
+		usage
+		;;
 	*)
-		echo "Usage: $0 [list [--sizes] | prune [--dry] [--days N]]"
+		usage
 		exit 1
 		;;
 esac
