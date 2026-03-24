@@ -14,6 +14,14 @@ set -euo pipefail
 
 DERIVED_DATA_DIR="$HOME/Library/Developer/Xcode/DerivedData"
 
+# Use just the command name if it's on PATH, otherwise the full path
+CMD_NAME=$(basename "$0")
+if command -v "$CMD_NAME" >/dev/null 2>&1; then
+	CMD_NAME="$CMD_NAME"
+else
+	CMD_NAME="$0"
+fi
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -175,9 +183,9 @@ list() {
 	printf "\n"
 
 	if [ $stale_count -gt 0 ]; then
-		printf "Run '${BOLD}%s prune${RESET}' to delete stale entries.\n" "$0"
+		printf "Run '${BOLD}%s prune${RESET}' to delete stale entries.\n" "$CMD_NAME"
 	fi
-	printf "Run '${BOLD}%s prune --days 30${RESET}' to also prune entries not built in 30 days.\n\n" "$0"
+	printf "Run '${BOLD}%s prune --days 30${RESET}' to also prune entries not built in 30 days.\n\n" "$CMD_NAME"
 }
 
 prune() {
